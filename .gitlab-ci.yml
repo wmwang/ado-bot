@@ -1,0 +1,34 @@
+stages:
+  - orchestrate
+  - agent-run
+
+default:
+  image: python:3.11-slim
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+    - pip install --no-cache-dir requests
+
+# -----------------------------------------------------------------------------
+# 1. Control Plane: Orchestrator 排程巡邏 (僅由 GitLab Schedule 觸發)
+# -----------------------------------------------------------------------------
+orchestrator-poll:
+  stage: orchestrate
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  script:
+    - python orchestrator/prototype.py
+
+# -----------------------------------------------------------------------------
+# 2. Data Plane: 通用 AI Agent 動態路由執行器
+# 當 Orchestrator 透過 Pipeline API 傳入 AGENT_NAME (例如 clarify-agent) 時，
+# 自動轉換為對應檔名 (agents/clarify_agent.py) 並啟動單一隔離容器執行。
+# 團隊新增 Agent 僅需在 agents/ 下新增 .py 檔，無需修改本設定檔！
+# -----------------------------------------------------------------------------
+run-agent:
+  stage: agent-run
+  rules:
+    - if: '$AGENT_NAME'
+  script:
+    - SCRIPT_NAME=$(echo "$AGENT_NAME" | tr '-' '_').py
+    - echo "啟動 Agent 腳本: agents/$SCRIPT_NAME (處理 Work Item #$WORK_ITEM_ID)"
+    - cd agents && python "$SCRIPT_NAME"
