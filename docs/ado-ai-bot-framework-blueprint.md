@@ -324,71 +324,68 @@ run-agent:
 
 ---
 
-### 6.2 團隊多人協作規範：Agent Python SDK 介面契約 (`BaseAgent`)
+### 6.2 團隊多人協作與品管規範：OpenCode 配置驅動架構 (`opencode.json` + 三明治審查迴圈)
 
-為了讓部門內不同工程師能平行開發各自的 AI Agent，底層的「ADO API 認證、留言讀取、目標業務 Repo Clone/Commit/Push、標籤切換」全部封裝在 [`agents/base_agent.py`](file:///Users/isosoman/Documents/repo/ado-bot/agents/base_agent.py) 中。
+為了避免單一 Agent「邊翻找數十個舊檔案污染 Context，又球員兼裁判自己審查自己」，本框架採用 **「外層 Python 確定性迴圈 (`UniversalOpenCodeAgent`) + 內層 OpenCode 子代理 (`@explore`)」** 的配置驅動（Configuration-Driven）設計。
 
-團隊成員開發新 Agent 時，**完全無需觸碰 ADO API 或 Git 指令**，只需遵守以下內部 SDK 規格：
+各部門擴充或調整任何 SDLC 階段時，**無需撰寫任何 Python 程式碼**，只需在 [`opencode.json`](../opencode.json) 與 [`prompts/`](../prompts/) 目錄下維護 Markdown 提示詞與目錄讀寫權限邊界。
 
-#### 1. 檔案命名與註冊契約
-- **檔案路徑**：`agents/{agent_name_snake_case}.py`（例如 `contract-agent` 對應 `agents/contract_agent.py`）。
-- **類別繼承**：繼承 `BaseAgent` 抽象基底類別。
+```mermaid
+flowchart TB
+    subgraph Python["外層：Python BaseAgent 確定性品管迴圈 (控制流程不走偏)"]
+        direction TB
+        S1["Step 1 (Draft): opencode run --agent stage-writer"]
+        S2["Step 2 (Review): opencode run --agent stage-reviewer"]
+        S3["Step 3 (Refine): opencode run --agent stage-writer"]
+        
+        S1 -->|"產出初稿"| S2
+        S2 -->|"REJECT 發現漏洞並提出審查意見"| S3
+    end
 
-#### 2. BaseAgent 內建 SDK 方法規格 (供子類別呼叫)
+    subgraph Inner1["內層：Step 1 與 Step 2 執行期間，OpenCode 內部自動派生"]
+        direction LR
+        W1["Primary Agent (主 Context：專注撰寫或審查)"]
+        E1["Subagent @explore (獨立子 Context：唯讀檢索業務 Repo)"]
+        
+        W1 -->|"派發子任務：查明現有架構與模組"| E1
+        E1 -.->|"僅回傳精煉架構摘要與關鍵檔案路徑"| W1
+    end
+
+    S1 -.- Inner1
+    S2 -.- Inner1
+```
+
+#### 1. 全 SDLC 階段權限邊界與角色矩陣 (`opencode.json`)
+
+透過 [`opencode.json`](../opencode.json) 的 `permission` 宣告式鎖定，從底層杜絕「寫測試的 Agent 偷改業務代碼來讓測試通過」或「審查員動手改壞檔案」的風險：
+
+| 階段 (`AGENT_NAME`) | Primary Writer 角色 | Primary Reviewer 角色 (唯讀) | 允許寫入路徑 (`edit` / `write`) | 允許執行指令 (`bash`) |
+|---|---|---|---|---|
+| `clarify-agent` | `clarify-agent-writer`<br/>([`01-clarify-writer.md`](../prompts/01-clarify-writer.md)) | `clarify-agent-reviewer`<br/>([`01-clarify-reviewer.md`](../prompts/01-clarify-reviewer.md)) | 僅限 `docs/features/**`<br/>(`01_clarify.md`) | 僅限 `git status/diff/log` |
+| `requirement-agent` | `requirement-agent-writer`<br/>([`02-requirement-writer.md`](../prompts/02-requirement-writer.md)) | `requirement-agent-reviewer`<br/>([`02-requirement-reviewer.md`](../prompts/02-requirement-reviewer.md)) | 僅限 `docs/features/**`<br/>(`02_requirements.md`) | 僅限 `git status/diff/log` |
+| `contract-agent` | `contract-agent-writer`<br/>([`03-contract-writer.md`](../prompts/03-contract-writer.md)) | `contract-agent-reviewer`<br/>([`03-contract-reviewer.md`](../prompts/03-contract-reviewer.md)) | 僅限 `docs/features/**`<br/>(`03_openapi.yaml`) | OpenAPI Linter (`redocly` / `openapi-generator-cli`) |
+| `scaffold-agent` | `scaffold-agent-writer`<br/>([`04-scaffold-writer.md`](../prompts/04-scaffold-writer.md)) | `scaffold-agent-reviewer`<br/>([`04-scaffold-reviewer.md`](../prompts/04-scaffold-reviewer.md)) | 僅限 `src/**`, `app/**`, `internal/**`<br/>(**禁止竄改 `docs/features/**`**) | 編譯與靜態檢查 (`py_compile`, `ruff`, `npm run build`, `go build`) |
+| `test-gen-agent` | `test-gen-agent-writer`<br/>([`05-test-writer.md`](../prompts/05-test-writer.md)) | `test-gen-agent-reviewer`<br/>([`05-test-reviewer.md`](../prompts/05-test-reviewer.md)) | 僅限 `tests/**`, `test/**`<br/>(**禁止竄改 `src/**` 業務代碼**) | 測試執行器 (`pytest`, `npm test`, `go test`) |
+
+#### 2. 跨目錄設定檔掛載與自動變更偵測 (`UniversalOpenCodeAgent`)
+
+由於 Agent 容器執行時的工作目錄（`cwd`）位於 `/workspace`（動態 Clone 下來的目標業務專案），而 `opencode.json` 與 `prompts/` 位於 `ado-bot` 工具儲存庫內，[`agents/base_agent.py`](../agents/base_agent.py) 透過以下機制無縫銜接：
+1. **環境變數掛載設定**：呼叫 `opencode run` 時自動注入 `OPENCODE_CONFIG="/path/to/ado-bot/opencode.json"`，既能套用統一規則，又不會將 `opencode.json` 污染進業務專案的 Git Commit。
+2. **確定性對抗審查迴圈 (`run_opencode_with_review`)**：
+   - 先執行 `stage-writer` 產出初稿。
+   - 再啟動 `stage-reviewer`（全新獨立 Session）進行審查；若輸出包含 `[PASS]` 則立即放行，若為 `[REJECT]` 則將具體審查意見餵回 `stage-writer` 修正（預設最多 `MAX_REVIEW_ROUNDS = 2` 輪）。
+3. **Git Status 自動感知產物 (`_detect_changed_files`)**：無需由 Python 寫死檔名，直接透過 `git -C /workspace status --porcelain` 自動抓取本次 OpenCode 新增或修改的所有檔案並提交推播。
+
+#### 3. 進階擴充：客製化 Python SDK 介面契約 (`BaseAgent`)
+
+若特定部門除了標準 `opencode.json` 流程外，仍需撰寫客製化 Python 前後置邏輯，亦可直接繼承 [`BaseAgent`](../agents/base_agent.py) 並設定 `USE_CUSTOM_SCRIPT="true"`：
 
 | 方法簽章 (Method Signature) | 回傳型別 | 用途說明 |
 |---|---|---|
-| `self.read_feature_file(filename: str)` | `Optional[str]` | 秒讀目標業務專案 `/workspace/docs/features/wi-{id}/<filename>` 的文字內容（若檔案不存在回傳 `None`）。 |
-| `self.write_feature_file(filename: str, content: str)` | `str` | 將產出內容寫入 `/workspace/docs/features/wi-{id}/<filename>`，並回傳相對於目標專案根目錄的檔案路徑。 |
-| `self.feature_file_exists(filename: str)` | `bool` | 檢查目標專案下是否已存在該規格檔案。 |
-| `self.workspace_dir` | `Path` | 目標業務專案的本地工作目錄根路徑（可用於寫入 `src/`、`tests/` 或執行 `pytest`）。 |
-
-#### 3. 必須實作的抽象介面與回傳結構 (`AgentResult`)
-
-| 屬性 / 方法 | 型別 | 必填 | 規格說明 |
-|---|---|---|---|
-| `agent_name` *(property)* | `str` | 是 | Agent 唯一識別碼（如 `"requirement-agent"`），自動對應狀態標籤 `{agent_name}:running` 與 `{agent_name}:done`。 |
-| `display_name` *(property)* | `str` | 是 | 顯示於 ADO Discussion 報告標題與 Git Commit 訊息的人類可讀名稱。 |
-| `execute(work_item, comments)` | `AgentResult` | 是 | Agent 核心業務邏輯入口。接收 ADO 卡片 `work_item` (dict) 與歷史留言 `comments` (list)，回傳 `AgentResult`。 |
-
-**`AgentResult` 資料結構欄位定義：**
-| 欄位名稱 | 型別 | 必填 | 說明 |
-|---|---|---|---|
-| `summary` | `str` | 是 | 發布至 ADO Discussion 的 Markdown 高階摘要報告。 |
-| `action_items_for_human` | `List[str]` | 否 | 需請 PM / Tech Lead 確認或回答的問題清單（自動渲染為待確認事項區塊）。 |
-| `files_written` | `List[str]` | 否 | 本次寫入目標業務 Repo 的檔案相對路徑清單（`BaseAgent` 將自動對這些檔案執行 `git add`、`commit` 與 `push`）。 |
-
-#### 4. 團隊新增 Agent 完整代碼範本 (`agents/requirement_agent.py`)
-
-```python
-from base_agent import BaseAgent, AgentResult
-
-class RequirementAgent(BaseAgent):
-    @property
-    def agent_name(self) -> str:
-        return "requirement-agent"  # 自動對應標籤 requirement-agent:running / :done
-
-    @property
-    def display_name(self) -> str:
-        return "系統分析 Agent (Requirement)"
-
-    def execute(self, work_item: dict, comments: list) -> AgentResult:
-        # 1. 本地秒讀上一階段 Clarify Agent 留下的規格書
-        prev_spec = self.read_feature_file("01_clarify.md")
-
-        # 2. 呼叫 LLM 產出 SA 規格書並寫入本地目標業務 Repo
-        written_path = self.write_feature_file("02_requirements.md", "# SA 規格書內容...")
-
-        # 3. 回傳結果（BaseAgent 會自動執行 git commit/push、發 ADO 留言、貼上 :done 標籤）
-        return AgentResult(
-            summary="已完成系統分析規格書撰寫。",
-            action_items_for_human=["請確認資料庫 Schema 是否符合 DBA 規範？"],
-            files_written=[written_path],
-        )
-
-if __name__ == "__main__":
-    RequirementAgent().run()
-```
+| `self.run_opencode_with_review(work_item, comments)` | `AgentResult` | 一鍵執行該階段的 OpenCode Writer <-> Reviewer 完整品管迴圈。 |
+| `self.read_feature_file(filename: str)` | `Optional[str]` | 秒讀目標業務專案 `/workspace/docs/features/wi-{id}/<filename>` 的文字內容。 |
+| `self.write_feature_file(filename: str, content: str)` | `str` | 將產出內容寫入 `/workspace/docs/features/wi-{id}/<filename>`。 |
+| `self.workspace_dir` | `Path` | 目標業務專案的本地工作目錄根路徑。 |
 
 ---
 
