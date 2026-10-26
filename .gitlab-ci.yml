@@ -2,40 +2,26 @@ stages:
   - orchestrate
   - agent-run
 
-default:
-  image: python:3.11-slim
-  before_script:
-    - apt-get update && apt-get install -y --no-install-recommends git curl nodejs npm && rm -rf /var/lib/apt/lists/*
-    - pip install --no-cache-dir requests
-    - npm install --global opencode-ai || true
-
-# -----------------------------------------------------------------------------
-# 1. Control Plane: Orchestrator 排程巡邏 (僅由 GitLab Schedule 觸發)
-# -----------------------------------------------------------------------------
+# 1. Control Plane: Orchestrator 排程巡邏 (輕量 Python 環境)
 orchestrator-poll:
   stage: orchestrate
+  image: python:3.11-slim
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  before_script:
+    - pip install --no-cache-dir requests
   script:
     - python orchestrator/prototype.py
 
-# -----------------------------------------------------------------------------
-# 2. Data Plane: 通用 AI Agent 動態路由執行器 (Configuration-Driven)
-# 預設直接啟動 agents/base_agent.py (UniversalOpenCodeAgent)，
-# 根據 $AGENT_NAME 自動讀取 opencode.json 與 prompts/ 執行 Writer -> Reviewer 迴圈；
-# 若特定部門有客製化 Python 腳本 (如 agents/custom_agent.py) 亦可自動降級相容。
-# -----------------------------------------------------------------------------
+# 2. Data Plane: Container 化標準 Java/Spring Boot + OpenCode 執行環境
 run-agent:
   stage: agent-run
+  image: eclipse-temurin:21-jdk
   rules:
     - if: '$AGENT_NAME'
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends git curl python3 python3-pip nodejs npm maven && rm -rf /var/lib/apt/lists/*
+    - pip3 install --no-cache-dir --break-system-packages requests
+    - npm install --global opencode-ai
   script:
-    - SCRIPT_NAME=$(echo "$AGENT_NAME" | tr '-' '_').py
-    - |
-      if [ -f "agents/$SCRIPT_NAME" ] && [ "$USE_CUSTOM_SCRIPT" = "true" ]; then
-        echo "啟動客製化 Agent 腳本: agents/$SCRIPT_NAME (Work Item #$WORK_ITEM_ID)"
-        cd agents && python "$SCRIPT_NAME"
-      else
-        echo "啟動通用 OpenCode 配置驅動執行器: agents/base_agent.py [AGENT_NAME=$AGENT_NAME] (Work Item #$WORK_ITEM_ID)"
-        python agents/base_agent.py
-      fi
+    - python3 agents/base_agent.py

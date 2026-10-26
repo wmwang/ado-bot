@@ -24,14 +24,13 @@ log = logging.getLogger("orchestrator")
 # 1. 欄位與 Agent 對照表 (極簡階段映射)
 # =============================================================================
 
-# 看板欄位名稱 -> 對應的 Agent 名稱
-# 每個 Agent 醒來以 {agent_name}:running 與 {agent_name}:done 作為狀態標籤
+# 看板欄位名稱 -> 對應 `.opencode/agents/<stage>.md` 的 Agent 名稱
+# 每個階段以 {stage}:running 與 {stage}:done 作為狀態標籤
 STAGE_MAPPING = {
-    "Clarify": "clarify-agent",
-    "Requirement": "requirement-agent",
-    "Contract": "contract-agent",
-    "Implement": "scaffold-agent",
-    "Test": "test-gen-agent",
+    "Clarify": "clarify",
+    "Spec": "spec",
+    "Requirement": "spec",
+    "Implement": "dev",
 }
 
 ADO_ORG = os.environ.get("ADO_ORGANIZATION", "your-org")

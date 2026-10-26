@@ -1,78 +1,63 @@
-# Azure DevOps AI Bot 框架 (ADO Bot Framework)
+# Azure DevOps AI Bot 框架 (OpenCode Container-Native 版)
 
-本專案是通用型 SDLC AI 自動化機器人的**工具與執行引擎 (Runner Engine)**。
-負責透過 **GitLab CI Scheduled Pipeline** 定期以 **WIQL (Work Item Query Language)** 取得 ADO 看板狀態，並調度各階段 AI Agent **動態至各業務應用儲存庫 (Target Application Repo)** 進行規格產出、程式碼實作與單元測試。
+本專案是基於 **OpenCode CLI** 的通用 SDLC 自動化機器人執行引擎。  
+採用 **「外部極簡單行 Runner + 內部 `.opencode/` 純 Markdown 彈性自治」** 架構：Agent 開發者無需修改任何 Python 腳本，只需維護 `.opencode/` 下的 Markdown 檔案即可擴充角色與規範。
 
 ---
 
-## 專案結構 (工具儲存庫 ado-bot)
+## 專案目錄結構
 
-```tree
-ado-bot/ (本工具儲存庫：保持純淨，不含業務代碼)
-├── docs/
-│   └── ado-ai-bot-framework-blueprint.md  # 完整的架構設計藍圖與通訊協定規範 (v2.1 解耦版)
+```text
+ado-bot/
+├── .opencode/                        # 【Agent 開發者核心工作區】透過 OPENCODE_CONFIG_DIR 掛載
+│   ├── opencode.json                 # 極簡無頭容器設定 (關閉互動詢問、限制龐大 log 截斷、自動壓縮)
+│   ├── agents/                       # SDLC 主控階段與專職子代理 (純 Markdown)
+│   │   ├── clarify.md                # [Primary] 階段 1：需求釐清與範圍盤點 -> 01_clarify.md
+│   │   ├── spec.md                   # [Primary] 階段 2：SA 規格 (AC 編號)、API 契約與設計 -> 02_spec.md
+│   │   ├── dev.md                    # [Primary] 階段 3：研發交付主控 (實作 + 調度測試/審查 + 自癒至綠燈)
+│   │   ├── explore.md                # [Subagent] 唯讀探索程式碼庫，隔離搜尋噪音
+│   │   ├── tester.md                 # [Subagent] 獨立視角對照 AC 撰寫 JUnit 5 測試
+│   │   └── reviewer.md               # [Subagent] 獨立黑臉審查員 (高推理強度唯讀把關)
+│   ├── skills/
+│   │   └── spring-boot-dev/SKILL.md  # Spring Boot + Maven/Gradle + JUnit 5 開發規範 (按需載入)
+│   └── plugins/
+│       └── anti-cheat.ts             # 底線護欄：攔截 -DskipTests / @Disabled 等跳過測試行為
 ├── orchestrator/
-│   └── prototype.py                       # Orchestrator 核心（WIQL 調和、派工目標業務 Repo、回滾保護）
+│   └── prototype.py                  # WIQL 看板輪詢與 GitLab Pipeline 派工
 ├── agents/
-│   ├── base_agent.py                      # Agent 基礎類別（動態 clone 目標業務 Repo 至 /workspace、Docs-as-Code、Git 提交）
-│   └── clarify_agent.py                   # 需求釐清 Agent 實作範例
-├── .gitlab-ci.yml                         # GitLab CI/CD Pipeline 配置
-└── README.md
+│   └── base_agent.py                 # 極簡 Container Runner (Clone -> 單行 opencode run -> 出口驗收 -> Push)
+└── .gitlab-ci.yml                    # CI 排程與 JDK 21 + OpenCode 容器執行定義
 ```
 
 ---
 
-## 雙儲存庫解耦架構 (Runner vs Target Repo)
+## SDLC 看板映射與執行機制
 
-- **工具儲存庫 (`ado-bot`)**：
-  - 存放共用的 Orchestrator 巡邏邏輯與 Agent 核心 Prompts。
-  - 不存放任何業務程式碼或專案規格。
-- **目標業務儲存庫 (`Target Application Repo`)**：
-  - 例如 `order-service`、`crm-web`（可位於 GitLab 或 ADO Repos）。
-  - Agent 在 CI 執行時動態 Clone 目標 Repo 至 `/workspace`：
-    - 規格存放：`workspace/docs/features/wi-{id}/...`
-    - 代碼存放：`workspace/src/...`
-    - 測試存放：`workspace/tests/...`
-  - 完成後直接推播回目標 Repo 的 `feat/wi-{id}` 分支。
+外部 Runner (`agents/base_agent.py`) 對所有階段皆執行**同一行標準指令**：
+
+```bash
+OPENCODE_CONFIG_DIR=/path/to/ado-bot/.opencode \
+opencode run \
+  --dir /workspace \
+  --agent "$AGENT_NAME" \
+  --dangerously-skip-permissions \
+  -f /tmp/wi-1024-context.md \
+  "請針對附件的 Work Item #1024 完成 $AGENT_NAME 階段交付"
+```
+
+| 看板欄位 | `AGENT_NAME` | 交付行為與品質把關 (Harness) |
+| :--- | :--- | :--- |
+| `Clarify` | `clarify` | 委派 `@explore` 盤點現有模組 ➔ 產出 `docs/features/wi-{id}/01_clarify.md` ➔ `@reviewer` 審查 |
+| `Spec` / `Requirement` | `spec` | 產出含 `AC-01..N` 追蹤碼的 `02_spec.md`（及選配 `03_openapi.yaml`）➔ `@reviewer` 審查 |
+| `Implement` | `dev` | 支援 Feature 與 Bugfix 雙軌：實作 `src/main` ➔ 委派 `@tester` 獨立寫 `src/test` ➔ 跑測試自癒至綠燈 ➔ `@reviewer` 終審 ➔ Push 前由 Python 執行最後一道 `mvn/gradle test` 出口驗收 |
 
 ---
 
-## 本地測試與模擬方式
+## Agent 開發者本地互動除錯方式
 
-### 1. 安裝必要套件
+想在本地目標 Java 專案直接測試或調整 `.opencode/agents/*.md` 時，無需透過 ADO，直接在目標專案目錄啟動 TUI 即可獲得與 CI 100% 一致的行為：
+
 ```bash
-pip install requests
+cd /path/to/your-spring-boot-repo
+OPENCODE_CONFIG_DIR=/path/to/ado-bot/.opencode opencode --agent dev
 ```
-
-### 2. 設定環境變數
-```bash
-# ADO 連線設定
-export ADO_ORGANIZATION="<你的-ado-組織名稱>"
-export ADO_PROJECT="<你的-ado-專案名稱>"
-export ADO_PAT="<個人存取權杖-Personal-Access-Token>"
-
-# GitLab CI 連線設定
-export GITLAB_URL="https://gitlab.example.com"
-export GITLAB_TOKEN="<gitlab-trigger-token>"
-export GITLAB_PROJECT_ID="<gitlab-project-id>"
-export GITLAB_DEFAULT_REF="main"
-
-# 目標業務儲存庫 (可選：若未指定則在本地目錄模擬)
-export TARGET_REPO_URL="https://gitlab.example.com/backend/order-service.git"
-```
-
-### 3. 執行 Orchestrator
-```bash
-python orchestrator/prototype.py
-```
-
-### 4. 單獨測試特定 Agent (例如 Clarify Agent)
-```bash
-export WORK_ITEM_ID="1024"
-export STAGE="clarify"
-export TARGET_BRANCH="feat/wi-1024"
-
-cd agents
-python clarify_agent.py
-```
-Agent 會動態拉取目標業務專案至 `/workspace`，將規格寫入 `workspace/docs/features/wi-1024/01_clarify.md` 並推播回目標專案分支。
